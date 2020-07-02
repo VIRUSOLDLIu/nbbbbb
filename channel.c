@@ -15,13 +15,14 @@
  * Lesser General Public License for more details.
  *
  * */
-
+#include <unistd.h>
 #include "debug.h"
 #include "iio-private.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+//
 
 static const char * const iio_chan_type_name_spec[] = {
 	[IIO_VOLTAGE] = "voltage",
@@ -56,9 +57,6 @@ static const char * const iio_chan_type_name_spec[] = {
 	[IIO_COUNT] = "count",
 	[IIO_INDEX] = "index",
 	[IIO_GRAVITY] = "gravity",
-	[IIO_POSITIONRELATIVE] = "positionrelative",
-	[IIO_PHASE] = "phase",
-	[IIO_MASSCONCENTRATION] = "massconcentration",
 };
 
 static const char * const modifier_names[] = {
@@ -82,7 +80,6 @@ static const char * const modifier_names[] = {
 	[IIO_MOD_LIGHT_GREEN] = "green",
 	[IIO_MOD_LIGHT_BLUE] = "blue",
 	[IIO_MOD_LIGHT_UV] = "uv",
-	[IIO_MOD_LIGHT_DUV] = "duv",
 	[IIO_MOD_QUATERNION] = "quaternion",
 	[IIO_MOD_TEMP_AMBIENT] = "ambient",
 	[IIO_MOD_TEMP_OBJECT] = "object",
@@ -98,13 +95,7 @@ static const char * const modifier_names[] = {
 	[IIO_MOD_I] = "i",
 	[IIO_MOD_Q] = "q",
 	[IIO_MOD_CO2] = "co2",
-	[IIO_MOD_ETHANOL] = "ethanol",
-	[IIO_MOD_H2] = "h2",
 	[IIO_MOD_VOC] = "voc",
-	[IIO_MOD_PM1] = "pm1",
-	[IIO_MOD_PM2P5] = "pm2p5",
-	[IIO_MOD_PM4] = "pm4",
-	[IIO_MOD_PM10] = "pm10",
 };
 
 /*
@@ -150,9 +141,8 @@ void iio_channel_init_finalize(struct iio_channel *chn)
 		len = strlen(iio_chan_type_name_spec[i]);
 		if (strncmp(iio_chan_type_name_spec[i], chn->id, len) != 0)
 			continue;
-		/* Type must be followed by one of a '\0', a '_', or a digit */
-		if (chn->id[len] != '\0' && chn->id[len] != '_' &&
-				(chn->id[len] < '0' || chn->id[len] > '9'))
+		/* Type must be followed by either a '_' or a digit */
+		if (chn->id[len] != '_' && chn->id[len] < '0' && chn->id[len] > '9')
 			continue;
 
 		chn->type = (enum iio_chan_type) i;
@@ -170,6 +160,9 @@ void iio_channel_init_finalize(struct iio_channel *chn)
 		len = strlen(modifier_names[i]);
 		if (strncmp(modifier_names[i], mod, len) != 0)
 			continue;
+		/* Modifier must be followed by a '_' */
+		if (mod[len] != '_')
+			continue;
 
 		chn->modifier = (enum iio_modifier) i;
 		break;
@@ -179,34 +172,26 @@ void iio_channel_init_finalize(struct iio_channel *chn)
 static char *get_attr_xml(struct iio_channel_attr *attr, size_t *length)
 {
 	char *str;
-	size_t len;
+	size_t len = strlen(attr->name) + sizeof("<attribute name=\"\" />");
+	if (attr->filename)
+		len += strlen(attr->filename) + sizeof("filename=\"\"");
 
-	len = strnlen(attr->name, MAX_ATTR_NAME);
-	len += sizeof("<attribute name=\"\" />") - 1;
-
-	if (attr->filename) {
-		len += strnlen(attr->filename, NAME_MAX);
-		len += sizeof(" filename=\"\"") - 1;
-	}
-
-	*length = len; /* just the chars */
-	len++;         /* room for terminating NULL */
 	str = malloc(len);
 	if (!str)
 		return NULL;
 
+	*length = len - 1; /* Skip the \0 */
 	if (attr->filename)
 		iio_snprintf(str, len, "<attribute name=\"%s\" filename=\"%s\" />",
 				attr->name, attr->filename);
 	else
 		iio_snprintf(str, len, "<attribute name=\"%s\" />", attr->name);
-
 	return str;
 }
 
 static char * get_scan_element(const struct iio_channel *chn, size_t *length)
 {
-	char buf[1024], repeat[12] = "", *str;
+	char buf[1024], repeat[8] = "", *str;
 	char processed = (chn->format.is_fully_defined ? 'A' - 'a' : 0);
 
 	if (chn->format.repeat > 1)
@@ -234,18 +219,12 @@ static char * get_scan_element(const struct iio_channel *chn, size_t *length)
 /* Returns a string containing the XML representation of this channel */
 char * iio_channel_get_xml(const struct iio_channel *chn, size_t *length)
 {
-	ssize_t len;
-	char *ptr, *eptr, *str, **attrs, *scan_element = NULL;
+	size_t len = sizeof("<channel id=\"\" name=\"\" "
+			"type=\"output\" ></channel>")
+		+ strlen(chn->id) + (chn->name ? strlen(chn->name) : 0);
+	char *ptr, *str, **attrs, *scan_element = NULL;
 	size_t *attrs_len, scan_element_len = 0;
 	unsigned int i;
-
-	len = sizeof("<channel id=\"\" type=\"\" ></channel>") - 1;
-	len += strnlen(chn->id, MAX_CHN_ID);
-	len += (chn->is_output ? sizeof("output") : sizeof("input")) - 1;
-	if (chn->name) {
-		len += sizeof(" name=\"\"") - 1;
-		len += strnlen(chn->name, MAX_CHN_NAME);
-	}
 
 	if (chn->is_scan_element) {
 		scan_element = get_scan_element(chn, &scan_element_len);
@@ -271,40 +250,29 @@ char * iio_channel_get_xml(const struct iio_channel *chn, size_t *length)
 		len += attrs_len[i];
 	}
 
-	len++;  /* room for terminating NULL */
 	str = malloc(len);
 	if (!str)
 		goto err_free_attrs;
-	ptr = str;
-	eptr = str + len;
 
-	if (len > 0) {
-		ptr += iio_snprintf(str, len, "<channel id=\"%s\"", chn->id);
-		len = eptr - ptr;
+	iio_snprintf(str, len, "<channel id=\"%s\"", chn->id);
+	ptr = strrchr(str, '\0');
+
+	if (chn->name) {
+		sprintf(ptr, " name=\"%s\"", chn->name);
+		ptr = strrchr(ptr, '\0');
 	}
 
-	if (chn->name && len > 0) {
-		ptr += iio_snprintf(ptr, len, " name=\"%s\"", chn->name);
-		len = eptr - ptr;
-	}
+	sprintf(ptr, " type=\"%s\" >", chn->is_output ? "output" : "input");
+	ptr = strrchr(ptr, '\0');
 
-	if (len > 0) {
-		ptr += iio_snprintf(ptr, len, " type=\"%s\" >", chn->is_output ? "output" : "input");
-		len = eptr - ptr;
-	}
-
-	if (chn->is_scan_element && len > (ssize_t) scan_element_len) {
-		memcpy(ptr, scan_element, scan_element_len); /* Flawfinder: ignore */
+	if (chn->is_scan_element) {
+		strcpy(ptr, scan_element);
 		ptr += scan_element_len;
-		len -= scan_element_len;
 	}
 
 	for (i = 0; i < chn->nb_attrs; i++) {
-		if (len > (ssize_t) attrs_len[i]) {
-			memcpy(ptr, attrs[i], attrs_len[i]); /* Flawfinder: ignore */
-			ptr += attrs_len[i];
-			len -= attrs_len[i];
-		}
+		strcpy(ptr, attrs[i]);
+		ptr += attrs_len[i];
 		free(attrs[i]);
 	}
 
@@ -312,20 +280,8 @@ char * iio_channel_get_xml(const struct iio_channel *chn, size_t *length)
 	free(attrs);
 	free(attrs_len);
 
-	if (len > 0) {
-		ptr += iio_strlcpy(ptr, "</channel>", len);
-		len -= sizeof("</channel>") -1;
-	}
-
-	*length = ptr - str;
-
-	/* NULL char should be left, and that is it */
-	if (len != 1) {
-		IIO_ERROR("Internal libIIO error: iio_channel_get_xml str length issue\n");
-		free(str);
-		return NULL;
-	}
-
+	strcpy(ptr, "</channel>");
+	*length = ptr - str + sizeof("</channel>") - 1;
 	return str;
 
 err_free_attrs:
@@ -409,9 +365,232 @@ ssize_t iio_channel_attr_read(const struct iio_channel *chn,
 ssize_t iio_channel_attr_write_raw(const struct iio_channel *chn,
 		const char *attr, const void *src, size_t len)
 {
+	
+	char filename[PATH_MAX];
+	FILE *file;
+	char A_BALANCED[] = "A_BALANCED";
+        char B_BALANCED[] = "B_BALANCED";
+        char C_BALANCED[] = "C_BALANCED";
+	char tddrx[] = "tddrx";
+	char tddtx[] = "tddtx";
+	char fdd[] = "fdd";
+	char alert[] = "alert";
+	char tx[] = "tx";
+	char rx[] = "rx";
+	char *nzhsrc;
+	char fd[] = "fd";	
+
+	nzhsrc = (char *)src;
+	int a = 1;
+	int b = 0;
+	int c = 3;
+	int d = 4;
+	printf("%d\n", d);
 	if (chn->dev->ctx->ops->write_channel_attr)
-		return chn->dev->ctx->ops->write_channel_attr(chn,
-				attr, src, len);
+	{
+		printf("%s=%s=\n", attr, src);
+		if (!strcmp(tddrx, nzhsrc))
+                 { printf("%s=%s=\n", attr, src);
+snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                       file = fopen(filename, "w+");
+                         char mode[2]; 
+                       fseek(file,0, SEEK_SET);
+                         fread(mode,1,2,file);
+                       fclose(file);
+ if(strcmp(rx,mode)){ if(strcmp(tx,mode)){
+                  snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/adi,frequency-division-duplex-mode-enable", chn->dev->id);
+ printf("%s=%s=\n", attr, src);
+          	        file = fopen(filename, "w");
+
+                	  fprintf(file, "%d\n", b);
+ printf("%d\n", c);
+                  	fclose(file);usleep(3000);
+                  snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/initialize", chn->dev->id);
+                 	file = fopen(filename, "w");
+                  	fprintf(file, "%d\n", a);
+                  	fclose(file);
+                 	usleep(3000); }
+	 	 snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                  	  file = fopen(filename, "w");
+                   	 fprintf(file, "%s\n", rx);
+                    	fclose(file);
+		usleep(3000);
+                                snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio963/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 0);
+                  fclose(file);    
+				   snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/out_altvoltage1_TX_LO_powerdown", chn->dev->id);
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 1);
+                  fclose(file);      //gpio
+
+		    }
+			 return chn->dev->ctx->ops->write_channel_attr(chn, attr, src, len);
+}
+if (!strcmp(tddtx, nzhsrc))				//判断是不是ｔｘ
+                  { snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                      file = fopen(filename, "w+");printf("fopen\n");
+			char mode[2]; printf("char\n");
+                      fseek(file,0, SEEK_SET);printf("fseek\n");
+			fread(mode,1,2,file);printf("fread%sn",mode);
+                      fclose(file);printf("fclose\n");							//写入ensmmode 的内容
+if(strcmp(tx,mode)){printf("ok!!!!!!!\n");														//如果不是tx
+				if(strcmp(rx,mode)){ 																				//如果不是rx,两者都不是则是ｆｄｄ模式
+                   snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/adi,frequency-division-duplex-mode-enable", chn->dev->id);
+                   file = fopen(filename, "w");
+                   fprintf(file, "%d\n", b);
+  printf("%d\n", c);
+                   fclose(file); usleep(3000);
+                   snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/initialize", chn->dev->id);
+                   file = fopen(filename, "w");
+                   fprintf(file, "%d\n", a);
+                   fclose(file);
+                  usleep(30000);
+snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/adi,frequency-division-duplex-mode-enable", chn->dev->id);
+                   file = fopen(filename, "w");
+                   fprintf(file, "%d\n", b);
+  printf("%d\n", c);
+                   fclose(file); usleep(3000);
+                   snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/initialize", chn->dev->id);
+                   file = fopen(filename, "w");
+                   fprintf(file, "%d\n", a);
+                   fclose(file);
+                  usleep(30000);
+				  }                                                                                                                    //初始化变成rx
+                 snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                     file = fopen(filename, "w");
+                     fprintf(file, "%s\n", tx);
+                     fclose(file);
+		     usleep(3000);																			//变成ｔｘ
+                 snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio963/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 1);
+                  fclose(file); 
+				  snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/out_altvoltage1_TX_LO_powerdown", chn->dev->id);
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 0);
+                  fclose(file);return chn->dev->ctx->ops->write_channel_attr(chn, attr, src, len);    }                               
+	 
+	//gpio
+		}
+
+  if (!strcmp(fdd, nzhsrc))
+                   {snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/out_altvoltage1_TX_LO_powerdown", chn->dev->id);
+                  	file = fopen(filename, "w");
+                  	fprintf(file, "%d\n", 0);
+                  	fclose(file);  
+snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                        file = fopen(filename, "w+");
+                          char mode[2]; 
+                        fseek(file,0, SEEK_SET);
+                          fread(mode,1,2,file);
+                        fclose(file);				//fread
+  if(strcmp(fd,mode)){									//不是ｆｄｄ
+
+                    snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/adi,frequency-division-duplex-mode-enable", chn->dev->id);
+                    file = fopen(filename, "w");
+                    fprintf(file, "%d\n", a);
+   printf("%d\n", c);
+                    fclose(file);usleep(3000);
+                    snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/initialize", chn->dev->id);
+                    file = fopen(filename, "w");
+                    fprintf(file, "%d\n", a);
+                    fclose(file);
+                   usleep(30000);
+ snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                      file = fopen(filename, "w");
+                      fprintf(file, "%s\n", fdd);
+                       fclose(file);
+                       usleep(30000);  
+snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/adi,frequency-division-duplex-mode-enable", chn->dev->id);
+                    file = fopen(filename, "w");
+                    fprintf(file, "%d\n", a);
+   printf("%d\n", c);
+                    fclose(file);usleep(3000);
+                    snprintf(filename, sizeof(filename), "/sys/kernel/debug/iio/%s/initialize", chn->dev->id);
+                    file = fopen(filename, "w");
+                    fprintf(file, "%d\n", a);
+                    fclose(file);
+                   usleep(30000);
+		  snprintf(filename, sizeof(filename), "/sys/bus/iio/devices/%s/ensm_mode", chn->dev->id);
+                     file = fopen(filename, "w");
+                     fprintf(file, "%s\n", fdd);
+                      fclose(file);
+                      usleep(30000);								//初始化改成ｆｄｄ
+		 snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio963/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 1);
+                  fclose(file);
+				   
+                 //gpiotx
+		return chn->dev->ctx->ops->write_channel_attr(chn, attr, src, len);		 }							//不是fddd的内容运行结束
+		 
+
+			
+}
+		if (!strcmp(A_BALANCED, nzhsrc))
+		{
+		 snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio961/value");
+                 file = fopen(filename, "w");
+                 fprintf(file, "%d\n", b);
+printf("%d\n", a);
+                 fclose(file);
+		 snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio962/value");
+                 file = fopen(filename, "w");
+                 fprintf(file, "%d\n", b);
+                 fclose(file);
+		 snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio960/value");
+                 file = fopen(filename, "w");
+                 fprintf(file, "%d\n", a);
+                 fclose(file);
+			return chn->dev->ctx->ops->write_channel_attr(chn,
+                                 attr, src, len);
+			}
+		 if (!strcmp(B_BALANCED,nzhsrc))
+			{
+		 snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio960/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 0);
+                  fclose(file); 
+                  snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio962/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 0);
+                  fclose(file); 
+                  snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio961/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 1);
+                  fclose(file); 
+
+			return chn->dev->ctx->ops->write_channel_attr(chn,
+                                 attr, src, len);
+			}
+		if (!strcmp(C_BALANCED,nzhsrc))
+			{
+		     snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio960/value");
+                     file = fopen(filename, "w");
+                     fprintf(file, "%d\n", 0);
+                     fclose(file); 
+                     snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio961/value");
+                     file = fopen(filename, "w");
+                     fprintf(file, "%d\n", 0);
+                   fclose(file); 
+                  snprintf(filename, sizeof(filename), "/sys/class/gpio/gpio962/value");
+                  file = fopen(filename, "w");
+                  fprintf(file, "%d\n", 1);
+                  fclose(file); 
+
+			return chn->dev->ctx->ops->write_channel_attr(chn,
+                                 attr, src, len);
+			}
+
+		else{printf("%d\n", a);
+
+			return chn->dev->ctx->ops->write_channel_attr(chn,
+				attr, src, len);printf("%d\n",c);}
+	
+
+}
+	
 	else
 		return -ENOSYS;
 }
@@ -710,9 +889,8 @@ int iio_channel_attr_read_longlong(const struct iio_channel *chn,
 	if (ret < 0)
 		return (int) ret;
 
-	errno = 0;
 	value = strtoll(buf, &end, 0);
-	if (end == buf || errno == ERANGE)
+	if (end == buf)
 		return -EINVAL;
 	*val = value;
 	return 0;
@@ -744,33 +922,33 @@ int iio_channel_attr_read_double(const struct iio_channel *chn,
 int iio_channel_attr_write_longlong(const struct iio_channel *chn,
 		const char *attr, long long val)
 {
-	int ret;
+	ssize_t ret;
 	char buf[1024];
 	iio_snprintf(buf, sizeof(buf), "%lld", val);
-	ret = (int) iio_channel_attr_write(chn, attr, buf);
+	ret = iio_channel_attr_write(chn, attr, buf);
 	return ret < 0 ? ret : 0;
 }
 
 int iio_channel_attr_write_double(const struct iio_channel *chn,
 		const char *attr, double val)
 {
-	int ret;
+	ssize_t ret;
 	char buf[1024];
 
-	ret = write_double(buf, sizeof(buf), val);
+	ret = (ssize_t) write_double(buf, sizeof(buf), val);
 	if (!ret)
-		ret = (int) iio_channel_attr_write(chn, attr, buf);
+		ret = iio_channel_attr_write(chn, attr, buf);
 	return ret < 0 ? ret : 0;
 }
 
 int iio_channel_attr_write_bool(const struct iio_channel *chn,
 		const char *attr, bool val)
 {
-	int ret;
+	ssize_t ret;
 	if (val)
-		ret = (int) iio_channel_attr_write_raw(chn, attr, "1", 2);
+		ret = iio_channel_attr_write_raw(chn, attr, "1", 2);
 	else
-		ret = (int) iio_channel_attr_write_raw(chn, attr, "0", 2);
+		ret = iio_channel_attr_write_raw(chn, attr, "0", 2);
 	return ret < 0 ? ret : 0;
 }
 
@@ -891,3 +1069,4 @@ const struct iio_device * iio_channel_get_device(const struct iio_channel *chn)
 {
 	return chn->dev;
 }
+
